@@ -12,6 +12,22 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 TOKEN = os.environ.get("BOT_TOKEN", "8941985228:AAF7tkzYPRmMcaVhkYrxse0oP3sdp3nNrXo")
 DB_NAME = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reminders.db")
 
+# Сдвиг московского времени относительно UTC
+MOSCOW_OFFSET_HOURS = 3
+
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ЧАСОВЫХ ПОЯСОВ ---
+def moscow_to_utc(time_str: str) -> str:
+    """Конвертирует московское время в UTC для хранения в БД"""
+    dt = datetime.strptime(time_str, '%d.%m.%Y %H:%M')
+    dt_utc = dt - timedelta(hours=MOSCOW_OFFSET_HOURS)
+    return dt_utc.strftime('%d.%m.%Y %H:%M')
+
+def utc_to_moscow(time_str: str) -> str:
+    """Конвертирует UTC из БД в московское время для отображения"""
+    dt = datetime.strptime(time_str, '%d.%m.%Y %H:%M')
+    dt_moscow = dt + timedelta(hours=MOSCOW_OFFSET_HOURS)
+    return dt_moscow.strftime('%d.%m.%Y %H:%M')
+
 # --- СОСТОЯНИЯ (FSM) ---
 class AddEvent(StatesGroup):
     text = State()
@@ -41,9 +57,13 @@ async def init_db():
 async def reminder_loop(bot: Bot):
     while True:
         await asyncio.sleep(5)
-        now = datetime.now()
+        # На Railway время сервера = UTC
+        now = datetime.utcnow()
         now_str = now.strftime('%d.%m.%Y %H:%M')
         in_5min_str = (now + timedelta(minutes=5)).strftime('%d.%m.%Y %H:%M')
+        
+        # Отладочный вывод в логи (поможет увидеть, что происходит)
+        print(f"[DEBUG] Server UTC: {now_str} | Moscow: {utc_to_moscow(now_str)}")
         
         async with aiosqlite.connect(DB_NAME) as db:
             # 1. Уведомления "за 5 минут"
@@ -55,10 +75,12 @@ async def reminder_loop(bot: Bot):
             events_5min = await cursor.fetchall()
 
             for e_id, user_id, text, e_time in events_5min:
+                # Показываем пользователю московское время
+                moscow_time = utc_to_moscow(e_time)
                 try:
                     await bot.send_message(
                         user_id,
-                        f"⏳ <b>5 минут до события:</b>\n\n{text}\n<i>Время: {e_time}</i>",
+                        f"⏳ <b>5 минут до события:</b>\n\n{text}\n<i>Время: {moscow_time} (МСК)</i>",
                         parse_mode="HTML"
                     )
                 except Exception as e:
@@ -106,21 +128,19 @@ router = Router()
 
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
-    text = ("Привет! Я бот-напоминалка.\n\n"
+    text = ("Привет! Я бот-напоминалка (время по Москве).\n\n"
             "Команды:\n"
             "/add — добавить событие\n"
             "/list — мои события\n"
             "/cancel — отменить текущее действие")
     await message.answer(text)
 
-# --- КОМАНДА ОТМЕНЫ ---
 @router.message(Command("cancel"))
 async def cmd_cancel(message: types.Message, state: FSMContext):
     current_state = await state.get_state()
     if current_state is None:
         await message.answer("Нечего отменять.")
         return
-    
     await state.clear()
     await message.answer("❌ Действие отменено.")
 
@@ -128,7 +148,6 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
 @router.message(Command("add"))
 async def cmd_add(message: types.Message, state: FSMContext):
     await state.set_state(AddEvent.text)
-    
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add")]
     ])
@@ -144,13 +163,12 @@ async def cancel_add(callback: types.CallbackQuery, state: FSMContext):
 async def process_text(message: types.Message, state: FSMContext):
     await state.update_data(text=message.text)
     await state.set_state(AddEvent.time)
-    
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_text")],
         [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add")]
     ])
     await message.answer(
-        "Введите дату и время в формате <b>ДД.ММ.ГГГГ ЧЧ:ММ</b>\n(Например: 08.07.2026 15:30)",
+        "Введите дату и время <b>по Москве</b> в формате <b>ДД.ММ.ГГГГ ЧЧ:ММ</b>\n(Например: 08.07.2026 18:30)",
         parse_mode="HTML",
         reply_markup=kb
     )
@@ -158,7 +176,6 @@ async def process_text(message: types.Message, state: FSMContext):
 @router.callback_query(F.data == "back_to_text", AddEvent.time)
 async def back_to_text(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(AddEvent.text)
-    
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add")]
     ])
@@ -168,7 +185,9 @@ async def back_to_text(callback: types.CallbackQuery, state: FSMContext):
 @router.message(AddEvent.time)
 async def process_time(message: types.Message, state: FSMContext):
     try:
+        # Проверяем формат
         datetime.strptime(message.text, '%d.%m.%Y %H:%M')
+        # Сохраняем московское время как есть (пользователь его ввёл)
         await state.update_data(time=message.text)
         await state.set_state(AddEvent.repeat)
         
@@ -185,21 +204,17 @@ async def process_time(message: types.Message, state: FSMContext):
             [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_text")],
             [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add")]
         ])
-        await message.answer(
-            "Неверный формат. Попробуйте еще раз (ДД.ММ.ГГГГ ЧЧ:ММ):",
-            reply_markup=kb
-        )
+        await message.answer("Неверный формат. Попробуйте еще раз (ДД.ММ.ГГГГ ЧЧ:ММ):", reply_markup=kb)
 
 @router.callback_query(F.data == "back_to_time", AddEvent.repeat)
 async def back_to_time(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(AddEvent.time)
-    
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_text")],
         [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add")]
     ])
     await callback.message.edit_text(
-        "Введите дату и время в формате <b>ДД.ММ.ГГГГ ЧЧ:ММ</b>\n(Например: 08.07.2026 15:30)",
+        "Введите дату и время <b>по Москве</b> в формате <b>ДД.ММ.ГГГГ ЧЧ:ММ</b>",
         parse_mode="HTML",
         reply_markup=kb
     )
@@ -210,15 +225,24 @@ async def process_repeat(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     repeat_type = callback.data.split("_")[1]
     
+    # ⭐ КОНВЕРТИРУЕМ московское время в UTC перед сохранением
+    moscow_time = data['time']
+    utc_time = moscow_to_utc(moscow_time)
+    
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
             "INSERT INTO events (user_id, text, event_time, repeat_type, notified_5min) VALUES (?, ?, ?, ?, 0)",
-            (callback.from_user.id, data['text'], data['time'], repeat_type)
+            (callback.from_user.id, data['text'], utc_time, repeat_type)
         )
         await db.commit()
-        
+    
     await state.clear()
-    await callback.message.edit_text("✅ Событие успешно добавлено!")
+    await callback.message.edit_text(
+        f"✅ Событие добавлено!\n"
+        f"📅 Время по Москве: <b>{moscow_time}</b>\n"
+        f"🌍 На сервере (UTC): <i>{utc_time}</i>",
+        parse_mode="HTML"
+    )
     await callback.answer()
 
 # --- ПРОСМОТР И РЕДАКТИРОВАНИЕ ---
@@ -235,13 +259,15 @@ async def cmd_list(message: types.Message):
         await message.answer("У вас нет запланированных событий.")
         return
 
-    text = "📋 <b>Ваши события:</b>\n\n"
+    text = "📋 <b>Ваши события (время по Москве):</b>\n\n"
     kb_buttons = []
     
     for e in events:
-        e_id, e_text, e_time, e_repeat = e
+        e_id, e_text, e_time_utc, e_repeat = e
+        # ⭐ КОНВЕРТИРУЕМ UTC из БД в московское время для отображения
+        e_time_moscow = utc_to_moscow(e_time_utc)
         repeat_str = {"none": "🔹", "daily": "🔁", "weekly": "🔂"}.get(e_repeat, "")
-        text += f"{repeat_str} <b>{e_time}</b>\n{e_text}\n\n"
+        text += f"{repeat_str} <b>{e_time_moscow}</b>\n{e_text}\n\n"
         
         kb_buttons.append([
             InlineKeyboardButton(text="⏳ Изменить время", callback_data=f"edit_time_{e_id}"),
@@ -257,12 +283,11 @@ async def process_edit_time(callback: types.CallbackQuery, state: FSMContext):
     event_id = int(callback.data.split("_")[-1])
     await state.update_data(edit_event_id=event_id)
     await state.set_state(EditEvent.time)
-    
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_edit")]
     ])
     await callback.message.edit_text(
-        "Введите <b>новое</b> время в формате ДД.ММ.ГГГГ ЧЧ:ММ:",
+        "Введите <b>новое</b> время <b>по Москве</b> в формате ДД.ММ.ГГГГ ЧЧ:ММ:",
         parse_mode="HTML",
         reply_markup=kb
     )
@@ -277,19 +302,26 @@ async def cancel_edit(callback: types.CallbackQuery, state: FSMContext):
 @router.message(EditEvent.time)
 async def process_new_time(message: types.Message, state: FSMContext):
     try:
-        new_time = datetime.strptime(message.text, '%d.%m.%Y %H:%M').strftime('%d.%m.%Y %H:%M')
+        moscow_time = datetime.strptime(message.text, '%d.%m.%Y %H:%M').strftime('%d.%m.%Y %H:%M')
+        # ⭐ КОНВЕРТИРУЕМ в UTC для сохранения
+        utc_time = moscow_to_utc(moscow_time)
         data = await state.get_data()
         event_id = data['edit_event_id']
         
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute(
                 "UPDATE events SET event_time = ?, notified_5min = 0 WHERE id = ?",
-                (new_time, event_id)
+                (utc_time, event_id)
             )
             await db.commit()
-            
+        
         await state.clear()
-        await message.answer(f"✅ Время успешно изменено на <b>{new_time}</b>", parse_mode="HTML")
+        await message.answer(
+            f"✅ Время изменено!\n"
+            f"📅 По Москве: <b>{moscow_time}</b>\n"
+            f"🌍 На сервере (UTC): <i>{utc_time}</i>",
+            parse_mode="HTML"
+        )
     except ValueError:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_edit")]
@@ -309,16 +341,12 @@ async def process_delete(callback: types.CallbackQuery):
 # --- ЗАПУСК ---
 async def main():
     await init_db()
-    
     bot = Bot(token=TOKEN)
     dp = Dispatcher()
     dp.include_router(router)
-    
     asyncio.create_task(reminder_loop(bot))
-    
     print("Бот запущен...")
     await dp.start_polling(bot)
-    # Бесконечное ожидание, чтобы процесс не завершился на Railway
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
