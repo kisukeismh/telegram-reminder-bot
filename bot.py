@@ -9,9 +9,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 # --- НАСТРОЙКИ ---
-# Токен берём из переменной окружения (для Railway) или из кода (для локального теста)
 TOKEN = os.environ.get("BOT_TOKEN", "8941985228:AAHrnzQV8pubS-kGH1RG_9vDnX5Hj8Juwk4")
-# Путь к БД — всегда рядом с bot.py
 DB_NAME = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reminders.db")
 
 # --- СОСТОЯНИЯ (FSM) ---
@@ -37,11 +35,6 @@ async def init_db():
                 notified_5min INTEGER DEFAULT 0
             )
         ''')
-        # Миграция: если БД старая и колонки notified_5min нет — добавим её
-        try:
-            await db.execute("ALTER TABLE events ADD COLUMN notified_5min INTEGER DEFAULT 0")
-        except aiosqlite.OperationalError:
-            pass  # колонка уже есть
         await db.commit()
 
 # --- ФОНОВАЯ ПРОВЕРКА НАПОМИНАНИЙ (КАЖДЫЕ 5 СЕКУНД) ---
@@ -53,8 +46,7 @@ async def reminder_loop(bot: Bot):
         in_5min_str = (now + timedelta(minutes=5)).strftime('%d.%m.%Y %H:%M')
         
         async with aiosqlite.connect(DB_NAME) as db:
-            # 1. Уведомления "за 5 минут": время события наступает в ближайшие 5 минут,
-            #    и предупреждение ещё не отправлено
+            # 1. Уведомления "за 5 минут"
             cursor = await db.execute(
                 "SELECT id, user_id, text, event_time FROM events "
                 "WHERE event_time <= ? AND event_time > ? AND notified_5min = 0",
@@ -73,7 +65,7 @@ async def reminder_loop(bot: Bot):
                     print(f"Не удалось отправить 5-min уведомление пользователю {user_id}: {e}")
                 await db.execute("UPDATE events SET notified_5min = 1 WHERE id = ?", (e_id,))
 
-            # 2. Основные уведомления: время события наступило
+            # 2. Основные уведомления в момент события
             cursor = await db.execute(
                 "SELECT id, user_id, text, event_time, repeat_type FROM events WHERE event_time <= ?",
                 (now_str,)
@@ -117,20 +109,61 @@ async def cmd_start(message: types.Message):
     text = ("Привет! Я бот-напоминалка.\n\n"
             "Команды:\n"
             "/add — добавить событие\n"
-            "/list — мои события (с возможностью редактирования)")
+            "/list — мои события\n"
+            "/cancel — отменить текущее действие")
     await message.answer(text)
+
+# --- КОМАНДА ОТМЕНЫ ---
+@router.message(Command("cancel"))
+async def cmd_cancel(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        await message.answer("Нечего отменять.")
+        return
+    
+    await state.clear()
+    await message.answer("❌ Действие отменено.")
 
 # --- ДОБАВЛЕНИЕ СОБЫТИЯ ---
 @router.message(Command("add"))
 async def cmd_add(message: types.Message, state: FSMContext):
     await state.set_state(AddEvent.text)
-    await message.answer("Введите описание события:")
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add")]
+    ])
+    await message.answer("Введите описание события:", reply_markup=kb)
+
+@router.callback_query(F.data == "cancel_add")
+async def cancel_add(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("❌ Добавление события отменено.")
+    await callback.answer()
 
 @router.message(AddEvent.text)
 async def process_text(message: types.Message, state: FSMContext):
     await state.update_data(text=message.text)
     await state.set_state(AddEvent.time)
-    await message.answer("Введите дату и время в формате <b>ДД.ММ.ГГГГ ЧЧ:ММ</b>\n(Например: 08.07.2026 15:30)", parse_mode="HTML")
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_text")],
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add")]
+    ])
+    await message.answer(
+        "Введите дату и время в формате <b>ДД.ММ.ГГГГ ЧЧ:ММ</b>\n(Например: 08.07.2026 15:30)",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+
+@router.callback_query(F.data == "back_to_text", AddEvent.time)
+async def back_to_text(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(AddEvent.text)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add")]
+    ])
+    await callback.message.edit_text("Введите описание события:", reply_markup=kb)
+    await callback.answer()
 
 @router.message(AddEvent.time)
 async def process_time(message: types.Message, state: FSMContext):
@@ -142,11 +175,35 @@ async def process_time(message: types.Message, state: FSMContext):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Не повторять", callback_data="repeat_none"),
              InlineKeyboardButton(text="Ежедневно", callback_data="repeat_daily")],
-            [InlineKeyboardButton(text="Еженедельно", callback_data="repeat_weekly")]
+            [InlineKeyboardButton(text="Еженедельно", callback_data="repeat_weekly")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_time")],
+            [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add")]
         ])
         await message.answer("Нужно ли повторять это событие?", reply_markup=kb)
     except ValueError:
-        await message.answer("Неверный формат. Попробуйте еще раз (ДД.ММ.ГГГГ ЧЧ:ММ):")
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_text")],
+            [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add")]
+        ])
+        await message.answer(
+            "Неверный формат. Попробуйте еще раз (ДД.ММ.ГГГГ ЧЧ:ММ):",
+            reply_markup=kb
+        )
+
+@router.callback_query(F.data == "back_to_time", AddEvent.repeat)
+async def back_to_time(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(AddEvent.time)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_text")],
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_add")]
+    ])
+    await callback.message.edit_text(
+        "Введите дату и время в формате <b>ДД.ММ.ГГГГ ЧЧ:ММ</b>\n(Например: 08.07.2026 15:30)",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+    await callback.answer()
 
 @router.callback_query(AddEvent.repeat, F.data.startswith("repeat_"))
 async def process_repeat(callback: types.CallbackQuery, state: FSMContext):
@@ -200,7 +257,21 @@ async def process_edit_time(callback: types.CallbackQuery, state: FSMContext):
     event_id = int(callback.data.split("_")[-1])
     await state.update_data(edit_event_id=event_id)
     await state.set_state(EditEvent.time)
-    await callback.message.edit_text("Введите <b>новое</b> время в формате ДД.ММ.ГГГГ ЧЧ:ММ:", parse_mode="HTML")
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_edit")]
+    ])
+    await callback.message.edit_text(
+        "Введите <b>новое</b> время в формате ДД.ММ.ГГГГ ЧЧ:ММ:",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "cancel_edit")
+async def cancel_edit(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("❌ Редактирование отменено.")
     await callback.answer()
 
 @router.message(EditEvent.time)
@@ -211,7 +282,6 @@ async def process_new_time(message: types.Message, state: FSMContext):
         event_id = data['edit_event_id']
         
         async with aiosqlite.connect(DB_NAME) as db:
-            # Сбрасываем флаг notified_5min, чтобы предупреждение сработало заново
             await db.execute(
                 "UPDATE events SET event_time = ?, notified_5min = 0 WHERE id = ?",
                 (new_time, event_id)
@@ -221,7 +291,10 @@ async def process_new_time(message: types.Message, state: FSMContext):
         await state.clear()
         await message.answer(f"✅ Время успешно изменено на <b>{new_time}</b>", parse_mode="HTML")
     except ValueError:
-        await message.answer("Неверный формат. Попробуйте еще раз:")
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_edit")]
+        ])
+        await message.answer("Неверный формат. Попробуйте еще раз:", reply_markup=kb)
 
 # --- УДАЛЕНИЕ ---
 @router.callback_query(F.data.startswith("del_"))
@@ -245,6 +318,8 @@ async def main():
     
     print("Бот запущен...")
     await dp.start_polling(bot)
+    # Бесконечное ожидание, чтобы процесс не завершился на Railway
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
     try:
