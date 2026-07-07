@@ -9,7 +9,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 # --- НАСТРОЙКИ ---
-TOKEN = os.environ.get("BOT_TOKEN", "8941985228:AAHrnzQV8pubS-kGH1RG_9vDnX5Hj8Juwk4")
+TOKEN = os.environ.get("BOT_TOKEN", "8941985228:AAF7tkzYPRmMcaVhkYrxse0oP3sdp3nNrXo")
 DB_NAME = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reminders.db")
 
 # --- СОСТОЯНИЯ (FSM) ---
