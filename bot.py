@@ -232,7 +232,33 @@ async def menu_help(callback: types.CallbackQuery):
         ])
     )
     await callback.answer()
-
+    
+@router.message(Command("help"))
+async def cmd_help(message: types.Message):
+    await message.answer(
+        "❓ <b>Помощь</b>\n\n"
+        "📌 <b>Как добавить событие:</b>\n"
+        "1. Нажмите ➕ Добавить событие\n"
+        "2. Введите описание\n"
+        "3. Выберите время (кнопки или вручную)\n"
+        "4. Выберите повторение\n\n"
+        "📌 <b>Как просмотреть события:</b>\n"
+        "Нажмите 📋 Мои события\n\n"
+        "📌 <b>Как изменить время:</b>\n"
+        "В списке событий нажмите ⏳ Изм. время\n\n"
+        "📌 <b>Время:</b>\n"
+        "Все время указывается <b>по Москве</b>.\n"
+        "Напоминания приходят за 5 минут и в момент события.\n\n"
+        "📌 <b>Команды:</b>\n"
+        "/start — главное меню\n"
+        "/menu — повторить меню\n"
+        "/add — добавить событие\n"
+        "/list — мои события\n"
+        "/cancel — отменить действие\n"
+        "/help — эта помощь",
+        parse_mode="HTML",
+        reply_markup=get_main_menu_keyboard()
+    )
 @router.callback_query(F.data == "menu_main")
 async def menu_main(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
