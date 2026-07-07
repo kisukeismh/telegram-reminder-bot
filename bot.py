@@ -9,7 +9,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 # --- НАСТРОЙКИ ---
-TOKEN = os.environ.get("BOT_TOKEN", "8619291995:AAHKm8AVF5CWhnCfc8YDs4VkwDeyMBZwZ0I")
+TOKEN = os.environ.get("BOT_TOKEN", "8941985228:AAF7tkzYPRmMcaVhkYrxse0oP3sdp3nNrXo")
 DB_NAME = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reminders.db")
 MOSCOW_OFFSET = timezone(timedelta(hours=3))
 
@@ -29,9 +29,11 @@ def get_preset_utc_time(preset: str) -> str:
     elif preset == '1h':
         target = now_utc + timedelta(hours=1)
     elif preset == 'tom_9':
+        # Завтра 9:00 МСК = завтра 6:00 UTC
         tomorrow = (now_utc + timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0)
         target = tomorrow
     elif preset == 'tom_18':
+        # Завтра 18:00 МСК = завтра 15:00 UTC
         tomorrow = (now_utc + timedelta(days=1)).replace(hour=15, minute=0, second=0, microsecond=0)
         target = tomorrow
     else:
@@ -241,7 +243,7 @@ async def menu_main(callback: types.CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-# --- КОМАНДЫ (дублируют меню для удобства) ---
+# --- КОМАНДЫ ---
 @router.message(Command("cancel"))
 async def cmd_cancel(message: types.Message, state: FSMContext):
     if await state.get_state():
@@ -294,7 +296,9 @@ async def back_to_text(callback: types.CallbackQuery, state: FSMContext):
 
 @router.callback_query(AddEvent.time_select, F.data.startswith("time_"))
 async def handle_preset_time(callback: types.CallbackQuery, state: FSMContext):
-    preset = callback.data.split("_")[1]
+    # ⭐ ИСПРАВЛЕНО: split("_", 1) чтобы правильно разобрать "time_tom_9" и "time_tom_18"
+    preset = callback.data.split("_", 1)[1]
+    
     if preset == 'manual':
         await state.set_state(AddEvent.time)
         await callback.message.edit_text("Введите время в формате <b>ДД.ММ.ГГГГ ЧЧ:ММ</b> (по Москве)", parse_mode="HTML",
