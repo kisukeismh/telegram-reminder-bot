@@ -51,28 +51,16 @@ def parse_user_time(text: str, now_msk: datetime) -> datetime:
         return datetime.strptime(text, '%d.%m.%Y %H:%M').replace(tzinfo=MOSCOW_OFFSET)
 
 def parse_advance_input(text: str) -> int:
-    """
-    Парсит ввод интервала предварительного напоминания.
-    Возвращает количество минут (int).
-    Поддерживает:
-      - '0' или 'off' — отключить (возвращает 0)
-      - '5', '30' — минуты
-      - '5m', '30m', '5м' — минуты
-      - '1h', '2h', '1ч', '2ч' — часы
-      - '1.5h' — полтора часа (90 минут)
-    """
     text = text.strip().lower().replace(' ', '')
     
     if text in ('0', 'off', 'нет', 'no', 'выкл'):
         return 0
     
-    # Часы: 1h, 2ч, 1.5h
     m = re.match(r'^(\d+(?:[.,]\d+)?)\s*(h|ч|час|часа|часов)$', text)
     if m:
         value = float(m.group(1).replace(',', '.'))
         return max(1, int(round(value * 60)))
     
-    # Минуты: 5m, 30м, 5мин, 30минут
     m = re.match(r'^(\d+(?:[.,]\d+)?)\s*(m|м|min|мин|минут|минуты)?$', text)
     if m:
         value = float(m.group(1).replace(',', '.'))
@@ -80,13 +68,62 @@ def parse_advance_input(text: str) -> int:
     
     raise ValueError("Неверный формат")
 
+def get_weekday_name(dt: datetime) -> str:
+    weekdays = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье']
+    return weekdays[dt.weekday()]
+
+def format_week_calendar(events: list, now_msk: datetime) -> str:
+    """Форматирует события в календарь на неделю"""
+    if not events:
+        return "📅 <b>Календарь на неделю</b>\n\nНет событий на ближайшие 7 дней."
+    
+    days = {}
+    for e_id, txt, tm, rep, adv_min in events:
+        event_dt = datetime.strptime(tm, '%d.%m.%Y %H:%M').replace(tzinfo=timezone.utc)
+        event_msk = event_dt.astimezone(MOSCOW_OFFSET)
+        day_key = event_msk.date()
+        
+        if day_key not in days:
+            days[day_key] = []
+        days[day_key].append({
+            'time': event_msk.strftime('%H:%M'),
+            'text': txt,
+            'repeat': rep,
+            'adv_min': adv_min
+        })
+    
+    text = "📅 <b>Календарь на неделю</b>\n\n"
+    
+    for day in sorted(days.keys()):
+        day_msk = datetime.combine(day, datetime.min.time()).replace(tzinfo=MOSCOW_OFFSET)
+        weekday = get_weekday_name(day_msk)
+        date_str = day.strftime('%d.%m.%Y')
+        
+        if day == now_msk.date():
+            day_label = f"🔸 <b>Сегодня, {weekday}</b> ({date_str})"
+        elif day == (now_msk + timedelta(days=1)).date():
+            day_label = f"🔹 <b>Завтра, {weekday}</b> ({date_str})"
+        else:
+            day_label = f"<b>{weekday}</b> ({date_str})"
+        
+        text += f"{day_label}\n"
+        
+        for event in sorted(days[day], key=lambda x: x['time']):
+            icon = {"none": "🔹", "daily": "🔁", "weekly": "🔂"}.get(event['repeat'], "")
+            adv_info = f" ⏳({event['adv_min']}м)" if event['adv_min'] > 0 else ""
+            text += f"  {icon} {event['time']}{adv_info} — {event['text']}\n"
+        
+        text += "\n"
+    
+    return text.strip()
+
 # --- СОСТОЯНИЯ (FSM) ---
 class AddEvent(StatesGroup):
     text = State()
     time = State()
     time_select = State()
     advance = State()
-    advance_manual = State()   # ⭐ НОВОЕ: ручной ввод интервала
+    advance_manual = State()
     repeat = State()
 
 class EditEvent(StatesGroup):
@@ -176,9 +213,11 @@ router = Router()
 # --- КЛАВИАТУРЫ ---
 def get_main_menu_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Добавить событие", callback_data="menu_add"),
+        [InlineKeyboardButton(text="➕ Добавить", callback_data="menu_add"),
          InlineKeyboardButton(text="📋 Мои события", callback_data="menu_list")],
-        [InlineKeyboardButton(text="❌ Отменить действие", callback_data="menu_cancel"),
+        [InlineKeyboardButton(text="📅 Календарь", callback_data="menu_week"),
+         InlineKeyboardButton(text="🔍 Поиск", callback_data="menu_search")],
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="menu_cancel"),
          InlineKeyboardButton(text="❓ Помощь", callback_data="menu_help")]
     ])
 
@@ -189,7 +228,7 @@ def get_advance_keyboard():
         [InlineKeyboardButton(text="30 минут", callback_data="adv_30"),
          InlineKeyboardButton(text="1 час", callback_data="adv_60")],
         [InlineKeyboardButton(text="🔕 Без предв. напоминания", callback_data="adv_0")],
-        [InlineKeyboardButton(text="✏️ Ввести вручную", callback_data="adv_manual")],  # ⭐ НОВОЕ
+        [InlineKeyboardButton(text="✏️ Ввести вручную", callback_data="adv_manual")],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")]
     ])
 
@@ -278,6 +317,92 @@ async def menu_list(callback: types.CallbackQuery):
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
     await callback.answer()
 
+# Календарь на неделю
+@router.callback_query(F.data == "menu_week")
+async def menu_week(callback: types.CallbackQuery):
+    now_msk = datetime.now(MOSCOW_OFFSET)
+    week_start = now_msk.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_end = week_start + timedelta(days=7)
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute(
+            "SELECT id, text, event_time, repeat_type, advance_minutes FROM events "
+            "WHERE user_id = ? AND event_time >= ? AND event_time < ? ORDER BY event_time",
+            (callback.from_user.id, week_start.strftime('%d.%m.%Y %H:%M'), week_end.strftime('%d.%m.%Y %H:%M'))
+        )
+        events = await cursor.fetchall()
+    
+    text = format_week_calendar(events, now_msk)
+    
+    await callback.message.edit_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")]
+        ])
+    )
+    await callback.answer()
+
+# Поиск (кнопка в меню)
+@router.callback_query(F.data == "menu_search")
+async def menu_search_prompt(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "🔍 <b>Поиск событий</b>\n\n"
+        "Используйте команду:\n"
+        "<code>/search слово</code>\n\n"
+        "Пример: <code>/search встреча</code>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")]
+        ])
+    )
+    await callback.answer()
+
+# Команда /search
+@router.message(Command("search"))
+async def cmd_search(message: types.Message):
+    query = message.text.split(maxsplit=1)
+    if len(query) < 2:
+        await message.answer(
+            "🔍 <b>Использование:</b>\n"
+            "<code>/search слово</code>\n\n"
+            "Пример: <code>/search встреча</code>",
+            parse_mode="HTML"
+        )
+        return
+    
+    search_text = query[1].strip()
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute(
+            "SELECT id, text, event_time, repeat_type, advance_minutes FROM events "
+            "WHERE user_id = ? AND text LIKE ? ORDER BY event_time",
+            (message.from_user.id, f"%{search_text}%")
+        )
+        events = await cursor.fetchall()
+    
+    if not events:
+        await message.answer(
+            f"🔍 По запросу «<b>{search_text}</b>» ничего не найдено.",
+            parse_mode="HTML",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return
+    
+    text = f"🔍 <b>Результаты поиска</b> по «{search_text}»:\n\n"
+    kb = []
+    for e_id, txt, tm, rep, adv_min in events:
+        icon = {"none": "🔹", "daily": "🔁", "weekly": "🔂"}.get(rep, "")
+        adv_info = f" ⏳({adv_min} мин)" if adv_min > 0 else ""
+        text += f"{icon} <b>{utc_to_moscow(tm)}</b>{adv_info}\n{txt}\n\n"
+        kb.append([
+            InlineKeyboardButton(text="⏳ Изм. время", callback_data=f"edit_time_{e_id}"),
+            InlineKeyboardButton(text="❌ Удалить", callback_data=f"del_{e_id}")
+        ])
+    
+    kb.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_main")])
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
+
 @router.callback_query(F.data == "menu_cancel")
 async def menu_cancel(callback: types.CallbackQuery, state: FSMContext):
     if await state.get_state():
@@ -329,6 +454,24 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
 async def cmd_help(message: types.Message):
     await message.answer(get_help_text(), parse_mode="HTML", reply_markup=get_main_menu_keyboard())
 
+# Команда /week
+@router.message(Command("week"))
+async def cmd_week(message: types.Message):
+    now_msk = datetime.now(MOSCOW_OFFSET)
+    week_start = now_msk.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_end = week_start + timedelta(days=7)
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute(
+            "SELECT id, text, event_time, repeat_type, advance_minutes FROM events "
+            "WHERE user_id = ? AND event_time >= ? AND event_time < ? ORDER BY event_time",
+            (message.from_user.id, week_start.strftime('%d.%m.%Y %H:%M'), week_end.strftime('%d.%m.%Y %H:%M'))
+        )
+        events = await cursor.fetchall()
+    
+    text = format_week_calendar(events, now_msk)
+    await message.answer(text, parse_mode="HTML", reply_markup=get_main_menu_keyboard())
+
 def get_help_text() -> str:
     return (
         "❓ <b>Помощь</b>\n\n"
@@ -349,18 +492,19 @@ def get_help_text() -> str:
         "• <b>2h</b> или <b>2ч</b> — 2 часа\n"
         "• <b>1.5h</b> — полтора часа\n"
         "• <b>0</b> — отключить\n\n"
-        "📌 <b>Как просмотреть события:</b>\n"
-        "Нажмите 📋 Мои события\n\n"
-        "📌 <b>Как изменить время:</b>\n"
-        "В списке событий нажмите ⏳ Изм. время\n\n"
-        "📌 <b>Время:</b>\n"
-        "Все время указывается <b>по Москве</b>.\n"
-        "Прошедшие даты ввести нельзя.\n\n"
+        "📌 <b>Календарь на неделю:</b>\n"
+        "Нажмите 📅 Календарь или используйте /week\n"
+        "Показывает все события на 7 дней вперёд, сгруппированные по дням.\n\n"
+        "📌 <b>Поиск событий:</b>\n"
+        "Используйте /search <слово>\n"
+        "Пример: /search встреча\n\n"
         "📌 <b>Команды:</b>\n"
         "/start — главное меню\n"
         "/menu — повторить меню\n"
         "/add — добавить событие\n"
         "/list — мои события\n"
+        "/week — календарь на неделю\n"
+        "/search <слово> — поиск\n"
         "/cancel — отменить действие\n"
         "/help — эта помощь"
     )
@@ -483,7 +627,6 @@ async def process_time_manual(message: types.Message, state: FSMContext):
             reply_markup=cancel_kb
         )
 
-# ⭐ НОВОЕ: ручной ввод интервала предварительного напоминания
 @router.callback_query(AddEvent.advance, F.data == "adv_manual")
 async def advance_manual_prompt(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(AddEvent.advance_manual)
@@ -522,7 +665,6 @@ async def process_advance_manual(message: types.Message, state: FSMContext):
     try:
         minutes = parse_advance_input(message.text)
         
-        # Ограничение: не больше года (525600 минут)
         if minutes > 525600:
             await message.answer(
                 "⚠️ Слишком большое значение. Максимум — 525600 минут (1 год).",
