@@ -10,7 +10,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 # --- НАСТРОЙКИ ---
-TOKEN = os.environ.get("BOT_TOKEN", "8619291995:AAHKm8AVF5CWhnCfc8YDs4VkwDeyMBZwZ0I")
+TOKEN = os.environ.get("BOT_TOKEN", "8619291995:AAGMrcTaA9dg9j0BrM7ZB3XSbNJokOerMzA")
 DB_NAME = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reminders.db")
 MOSCOW_OFFSET = timezone(timedelta(hours=3))
 
